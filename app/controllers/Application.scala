@@ -5,13 +5,14 @@ import javax.inject.Inject
 import akka.NotUsed
 import akka.stream.scaladsl.{Source, _}
 import akka.util._
+import play.api.Configuration
 import play.api.libs.EventSource
 import play.api.libs.json._
-import play.api.libs.ws.{WSClient, WSRequest}
+import play.api.libs.ws.WSClient
 import play.api.mvc._
 
 import scala.concurrent.ExecutionContext
-import scala.concurrent.duration._
+
 
 case class TweetInfo(searchQuery: String, message: String, author: String)
 
@@ -19,11 +20,12 @@ object TweetInfo {
   implicit val tweetInfoFormat = Json.format[TweetInfo]
 }
 
-class Application @Inject()(wSClient: WSClient)(implicit ec: ExecutionContext) extends Controller {
+class Application @Inject()(wsClient: WSClient, configuration: Configuration)(implicit ec: ExecutionContext) extends Controller {
 
+  private val tweeterUrl = configuration.getString("tweeter.url").get
 
   def index = Action {
-    //default search
+    //a default search
     Redirect(routes.Application.liveTouits(List("java", "ruby")))
   }
 
@@ -31,45 +33,33 @@ class Application @Inject()(wSClient: WSClient)(implicit ec: ExecutionContext) e
     Ok(views.html.index(queries))
   }
 
-  private def prefixAndAuthor = {
-    import java.util.Random
-    val prefixes = List("Tweet about", "Just heard about", "I love")
-    val authors = List("Bob", "Joe", "John")
-    val rand = new Random()
-    (prefixes(rand.nextInt(prefixes.length)), authors(rand.nextInt(authors.length)))
+  def mixedStream(queryString: String) = {
+
+    def createSourceFromQuery(keyword: String): Source[JsValue, NotUsed] = {
+
+      val request = wsClient.url(tweeterUrl).withQueryString("keyword" -> keyword)
+
+      Source.fromFuture(request.stream()).flatMapConcat(streamedResponse => streamedResponse.body)
+        // The Twitter service may send several messages in a single chunk, so we need to split them on line breaks.
+        // It could send chunks with incomplete messages. In this case the messages need to be saved in a buffer until
+        // we reach a line break. Fortunately, the Framing object does all the job for us. We just need to provide a
+        // separator (line break) and a max frame length for the source elements.
+        // The result of this operation is a new source that can be transformed into the new desired format.
+        .via(Framing.delimiter(ByteString("\n"), maximumFrameLength = 100, allowTruncation = true))
+        // The search query is in the response to ease filtering on the client side (TweetInfo case class).
+        .map { byteString =>
+          val json = Json.parse(byteString.utf8String)
+          val tweetInfo = TweetInfo(keyword, (json \ "message").as[String], (json \ "author").as[String])
+          Json.toJson(tweetInfo)
+        }
+    }
+
+    Action {
+      val keywordSources = Source(queryString.split(",").toList)
+      val responses = keywordSources.flatMapMerge(10, createSourceFromQuery)
+      // Play’s EventSource.flow method helps us format the messages into the Server Sent Events form... and the stream can flow
+      Ok.chunked(responses via EventSource.flow)
+    }
   }
-
-  //fake twitter API
-  def timeline(keyword: String) = Action {
-    val source = Source.tick(initialDelay = 0.second, interval = 1.second, tick = "tick")
-    Ok.chunked(source.map { tick =>
-      val (prefix, author) = prefixAndAuthor
-      Json.obj("message" -> s"$prefix $keyword", "author" -> author).toString + "\n"
-    }.limit(100))
-  }
-
-  val framing = Framing.delimiter(ByteString("\n"), maximumFrameLength = 100, allowTruncation = true)
-
-  def mixedStream(queryString: String) = Action {
-    val keywordSources = Source(queryString.split(",").toList)
-    val responses = keywordSources.flatMapMerge(10, queryToSource)
-    Ok.chunked(responses via EventSource.flow)
-  }
-
-  private def queryToSource(keyword: String) = {
-    val request = wSClient
-      .url(s"http://localhost:9000/timeline")
-      .withQueryString("keyword" -> keyword)
-
-    streamResponse(request)
-      .via(framing)
-      .map { byteString =>
-        val json = Json.parse(byteString.utf8String)
-        val tweetInfo = TweetInfo(keyword, (json \ "message").as[String], (json \ "author").as[String])
-        Json.toJson(tweetInfo)
-      }
-  }
-
-  private def streamResponse(request: WSRequest) = Source.fromFuture(request.stream()).flatMapConcat(_.body)
 
 }
