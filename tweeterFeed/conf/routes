@@ -1,0 +1,2 @@
+# Tweet feed
+GET    /tweets                   controllers.Tweeter.tweets(keyword:String)
