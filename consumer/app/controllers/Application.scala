@@ -3,15 +3,16 @@ package controllers
 import javax.inject.Inject
 
 import akka.NotUsed
-import akka.stream.scaladsl.{Source, _}
+import akka.stream.scaladsl._
 import akka.util._
 import play.api.Configuration
 import play.api.libs.EventSource
 import play.api.libs.json._
+import play.api.libs.streams._
 import play.api.libs.ws.WSClient
 import play.api.mvc._
 
-import scala.concurrent.ExecutionContext
+import scala.concurrent.{ExecutionContext, Future}
 
 class Application @Inject()(wsClient: WSClient, configuration: Configuration)(implicit ec: ExecutionContext) extends Controller {
 
@@ -20,7 +21,7 @@ class Application @Inject()(wsClient: WSClient, configuration: Configuration)(im
   case class TweetInfo(searchQuery: String, message: String, author: String)
 
   object TweetInfo {
-    implicit val tweetInfoFormat = Json.format[TweetInfo]
+    implicit val tweetInfoFormat: Format[TweetInfo] = Json.format[TweetInfo]
   }
 
   def index = Action {
@@ -30,7 +31,8 @@ class Application @Inject()(wsClient: WSClient, configuration: Configuration)(im
 
   /**
     * Displays different live tweets grabbed from the tweeterFeed.
-    * @param keywords
+    *
+    * @param keywords list of search keywords
     * @return
     */
   def liveTouits(keywords: List[String]) = Action {
@@ -41,10 +43,11 @@ class Application @Inject()(wsClient: WSClient, configuration: Configuration)(im
     * Given a comma-separated list of m keywords, this method invokes the tweeter API for each keyword to get m tweet
     * streams and then puts them all together into one stream for later display.
     * This App has an HTML page that displays all tweet feeds combined from one multi-keyword search.
+    *
     * @param keywordsString a comma-separated list of search keywords
     * @return
     */
-  def mergedStream(keywordsString: String) = {
+  def mergedStream(keywordsString: String): Action[AnyContent] = {
 
     //Creates a source tweet feed for the given keyword.
     def createSourceFromKeyword(keyword: String): Source[JsValue, NotUsed] = {
@@ -60,10 +63,10 @@ class Application @Inject()(wsClient: WSClient, configuration: Configuration)(im
         .via(Framing.delimiter(ByteString("\n"), maximumFrameLength = 100, allowTruncation = true))
         // The search query is in the response to ease filtering on the client side (TweetInfo case class).
         .map { byteString =>
-          val json = Json.parse(byteString.utf8String)
-          val tweetInfo = TweetInfo(keyword, (json \ "message").as[String], (json \ "author").as[String])
-          Json.toJson(tweetInfo)
-        }
+        val json = Json.parse(byteString.utf8String)
+        val tweetInfo = TweetInfo(keyword, (json \ "message").as[String], (json \ "author").as[String])
+        Json.toJson(tweetInfo)
+      }
     }
 
     Action {
@@ -73,6 +76,32 @@ class Application @Inject()(wsClient: WSClient, configuration: Configuration)(im
 
       // Play’s EventSource.flow method formats the messages as Server Sent Events... and the stream can flow
       Ok.chunked(mergedSources via EventSource.flow)
+    }
+  }
+
+  def upload: Action[Seq[Seq[String]]] = {
+
+
+    val csv: BodyParser[Seq[Seq[String]]] = BodyParser { req =>
+
+      // A flow that splits the stream into CSV lines
+      val sink: Sink[ByteString, Future[Seq[Seq[String]]]] = Flow[ByteString]
+        // We split by the new line character, allowing a maximum of 1000 characters per line
+        .via(Framing.delimiter(ByteString("\n"), 1000, allowTruncation = true))
+        // Turn each line to a String and split it by commas
+        .map { byteString =>
+        byteString.utf8String.trim.split(",").toSeq
+      }
+        // Now we fold it into a list
+        .toMat(Sink.fold(Seq.empty[Seq[String]])(_ :+ _))(Keep.right)
+
+      // Convert the body to a Right either
+      Accumulator(sink).map(Right.apply)
+    }
+
+    Action(csv) { req =>
+      Ok("uploaded")
+
     }
   }
 
