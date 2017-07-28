@@ -13,29 +13,41 @@ import play.api.mvc._
 
 import scala.concurrent.ExecutionContext
 
-
-case class TweetInfo(searchQuery: String, message: String, author: String)
-
-object TweetInfo {
-  implicit val tweetInfoFormat = Json.format[TweetInfo]
-}
-
 class Application @Inject()(wsClient: WSClient, configuration: Configuration)(implicit ec: ExecutionContext) extends Controller {
 
   private val tweeterUrl = configuration.getString("tweeter.url").get
+
+  case class TweetInfo(searchQuery: String, message: String, author: String)
+
+  object TweetInfo {
+    implicit val tweetInfoFormat = Json.format[TweetInfo]
+  }
 
   def index = Action {
     //a default search
     Redirect(routes.Application.liveTouits(List("java", "ruby")))
   }
 
-  def liveTouits(queries: List[String]) = Action {
-    Ok(views.html.index(queries))
+  /**
+    * Displays different live tweets grabbed from the tweeterFeed.
+    * @param keywords
+    * @return
+    */
+  def liveTouits(keywords: List[String]) = Action {
+    Ok(views.html.index(keywords))
   }
 
-  def mixedStream(queryString: String) = {
+  /**
+    * Given a comma-separated list of m keywords, this method invokes the tweeter API for each keyword to get m tweet
+    * streams and then puts them all together into one stream for later display.
+    * This App has an HTML page that displays all tweet feeds combined from one multi-keyword search.
+    * @param keywordsString a comma-separated list of search keywords
+    * @return
+    */
+  def mergedStream(keywordsString: String) = {
 
-    def createSourceFromQuery(keyword: String): Source[JsValue, NotUsed] = {
+    //Creates a source tweet feed for the given keyword.
+    def createSourceFromKeyword(keyword: String): Source[JsValue, NotUsed] = {
 
       val request = wsClient.url(tweeterUrl).withQueryString("keyword" -> keyword)
 
@@ -55,10 +67,12 @@ class Application @Inject()(wsClient: WSClient, configuration: Configuration)(im
     }
 
     Action {
-      val keywordSources = Source(queryString.split(",").toList)
-      val responses = keywordSources.flatMapMerge(10, createSourceFromQuery)
-      // Play’s EventSource.flow method helps us format the messages into the Server Sent Events form... and the stream can flow
-      Ok.chunked(responses via EventSource.flow)
+      val keywordSources = Source(keywordsString.split(",").toList)
+      //The list of sources we get are merged in a single stream by using flatMapMerge:
+      val mergedSources = keywordSources.flatMapMerge(10, createSourceFromKeyword)
+
+      // Play’s EventSource.flow method formats the messages as Server Sent Events... and the stream can flow
+      Ok.chunked(mergedSources via EventSource.flow)
     }
   }
 

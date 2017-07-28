@@ -1,4 +1,4 @@
-@(queries: List[String])
+@(keywordsString: List[String])
 
 @main("Mixed Tweets") {
 
@@ -6,18 +6,18 @@
   <p>Change URL parameters for new search</p>
 
 
-  @queries.zipWithIndex.map { case(value, index) =>
+  @keywordsString.zipWithIndex.map { case(value, index) =>
     <h3> <span id="message@index"></span> </h3>
   }
 
   <script type="text/javascript" charset="utf-8">
-    var feed = new EventSource("@routes.Application.mixedStream(queries.mkString(","))");
+    var feed = new EventSource("@routes.Application.mergedStream(keywordsString.mkString(","))");
       console.log("feed", feed);
       feed.addEventListener('message', function(event) {
         console.log(event);
         var result  = jQuery.parseJSON(event.data);
         console.log(result);
-        @queries.zipWithIndex.map { case(value, index) =>
+        @keywordsString.zipWithIndex.map { case(value, index) =>
         if(result.searchQuery === "@value"){
           $('#message@index').html(result.searchQuery + " : " + result.message + " | " + result.author)
         }
